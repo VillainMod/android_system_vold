@@ -113,6 +113,7 @@ static const char *stateToStr(int state) {
 }
 
 Volume::Volume(VolumeManager *vm, const char *label, const char *mount_point) {
+    char switchable[PROPERTY_VALUE_MAX];
     mVm = vm;
     mDebug = false;
     mLabel = strdup(label);
@@ -121,6 +122,29 @@ Volume::Volume(VolumeManager *vm, const char *label, const char *mount_point) {
     mCurrentlyMountedKdev = -1;
     mPartIdx = -1;
     mRetryMount = false;
+
+    property_get("persist.sys.vold.switchexternal", switchable, "0");
+    if (!strcmp(switchable,"1")) {
+        char *first, *second = NULL;
+        const char *delim = ",";
+
+        property_get("ro.vold.switchablepair", switchable, "");
+
+        if (!(first = strtok(switchable, delim))) {
+            SLOGE("Mount switch requested, but no switchable mountpoints found");
+            return;
+        } else if (!(second = strtok(NULL, delim))) {
+            SLOGE("Mount switch requested, but bad switchable mountpoints found");
+            return;
+        }
+        if (!strcmp(mount_point,first)) {
+                free(mMountpoint);
+                mMountpoint = strdup(second);
+        } else if (!strcmp(mount_point,second)) {
+                free(mMountpoint);
+                mMountpoint = strdup(first);
+        }
+    }
 }
 
 Volume::~Volume() {
@@ -246,6 +270,15 @@ int Volume::formatVol() {
 
     sprintf(devicePath, "/dev/block/vold/%d:%d",
             MAJOR(partNode), MINOR(partNode));
+
+#ifdef VOLD_EMMC_SHARES_DEV_MAJOR
+    // If emmc and sdcard share dev major number, vold may pick
+    // incorrectly based on partition nodes alone, formatting
+    // the wrong device. Use device nodes instead.
+    dev_t deviceNodes;
+    getDeviceNodes((dev_t *) &deviceNodes, 1);
+    sprintf(devicePath, "/dev/block/vold/%d:%d", MAJOR(deviceNodes), MINOR(deviceNodes));
+#endif
 
     if (mDebug) {
         SLOGI("Formatting volume %s (%s)", getLabel(), devicePath);
@@ -417,14 +450,10 @@ int Volume::mountVol() {
         errno = 0;
         int gid;
 
-        if (primaryStorage) {
-            // Special case the primary SD card.
-            // For this we grant write access to the SDCARD_RW group.
-            gid = AID_SDCARD_RW;
-        } else {
-            // For secondary external storage we keep things locked up.
-            gid = AID_MEDIA_RW;
-        }
+        // Originally, non-primary storage was set to MEDIA_RW group which
+        // prevented users from writing to it. We don't want that.
+        gid = AID_SDCARD_RW;
+
         if (Fat::doMount(devicePath, "/mnt/secure/staging", false, false, false,
                 AID_SYSTEM, gid, 0702, true)) {
             SLOGE("%s failed to mount via VFAT (%s)\n", devicePath, strerror(errno));
